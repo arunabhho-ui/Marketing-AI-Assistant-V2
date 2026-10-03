@@ -3,7 +3,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://marketing-ai-assistant.onrender.com/api/:path*"
+      "destination": "https://marketing-ai-assistant-v2.onrender.com/api/:path*"
     },
     {
       "source": "/:path*",
