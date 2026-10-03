@@ -5,6 +5,6 @@ import { extractProfile } from '../groqService.js'
 test('extractProfile requires a real Groq API key and does not fall back to demo data', async () => {
   await assert.rejects(
     () => extractProfile('A satellite-based farmer decision assistant that predicts crop health using Sentinel-2 and radar for Indian farmers.'),
-    /GROQ_API_KEY is required/i
+    /GROQ_API_KEY1 is required/i
   )
 })

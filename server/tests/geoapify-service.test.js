@@ -82,7 +82,7 @@ test('Geoapify does not substitute unrelated commercial places for farmer prospe
   }
 })
 
-test('Geoapify returns up to 15 unique place candidates for scoring', async () => {
+test('Geoapify returns all 20 unique place candidates fetched for scoring', async () => {
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (url) => {
     if (String(url).includes('/v1/geocode/')) return geocodeResponse()
@@ -105,8 +105,41 @@ test('Geoapify returns up to 15 unique place candidates for scoring', async () =
       category: 'Coffee shop ordering app',
       keywords: ['coffee', 'cafe']
     }, 'test-key')
-    assert.equal(result.leads.length, 15)
-    assert.equal(result.count, 15)
+    assert.equal(result.leads.length, 20)
+    assert.equal(result.count, 20)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('Geoapify passes through listed place email, phone, and website contacts', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('/v1/geocode/')) return geocodeResponse()
+    return new Response(JSON.stringify({
+      features: [{
+        geometry: { coordinates: [-97.7431, 30.2672] },
+        properties: {
+          name: 'Austin Medical Clinic',
+          categories: ['healthcare.hospital'],
+          city: 'Austin',
+          state_code: 'TX',
+          website: 'https://clinic.example',
+          contact: { phone: '+1 512 555 0100', email: 'hello@clinic.example' }
+        }
+      }]
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+
+  try {
+    const result = await searchB2CLeads(profile, 'test-key')
+    assert.equal(result.leads[0].email, 'hello@clinic.example')
+    assert.equal(result.leads[0].phone, '+1 512 555 0100')
+    assert.equal(result.leads[0].website, 'https://clinic.example')
+    assert.equal(result.leads[0].contactSource, 'Geoapify listing')
+    assert.equal(result.leads[0].emailSource, 'Geoapify listing')
+    assert.equal(result.leads[0].phoneSource, 'Geoapify listing')
+    assert.equal(result.leads[0].contactStatus, 'Contact found')
   } finally {
     globalThis.fetch = originalFetch
   }

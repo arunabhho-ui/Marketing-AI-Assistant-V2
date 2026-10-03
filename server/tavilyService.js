@@ -1,4 +1,50 @@
 const TAVILY_SEARCH_URL = 'https://api.tavily.com/search'
+const NON_COMPANY_DOMAINS = [
+  'linkedin.com',
+  'facebook.com',
+  'instagram.com',
+  'threads.net',
+  'x.com',
+  'twitter.com',
+  'indiamart.com',
+  'justdial.com',
+  'yelp.com',
+  'reddit.com',
+  'crunchbase.com'
+]
+const LISTICLE_PATTERN = /\b(?:top\s+\d+|best\s+\d+|(?:top|best)\b.{0,80}\b(?:companies|firms|consultants|agencies|providers|vendors|startups|businesses)|companies\s+to\s+watch|list\s+of\s+(?:top\s+)?\d*\s*(?:companies|firms|vendors|providers)|directory\s+of)\b/i
+const REPORT_PATTERN = /\b(?:market\s+(?:size|report|forecast)|industry\s+report|(?:alternatives|competitors)\s+(?:to|for))\b/i
+
+function getHostname(url) {
+  try {
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, '')
+  } catch {
+    return ''
+  }
+}
+
+function isKnownPlatformResult(result) {
+  const hostname = getHostname(result.url)
+  return !hostname || NON_COMPANY_DOMAINS.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`))
+}
+
+function getPageText(result) {
+  return `${result.title || ''} ${(result.content || '').slice(0, 1000)} ${(result.raw_content || '').slice(0, 2500)}`
+}
+
+function isListicleResult(result) {
+  return LISTICLE_PATTERN.test(getPageText(result))
+}
+
+function isReportResult(result) {
+  return REPORT_PATTERN.test(getPageText(result))
+}
+
+function isActionableCompanyResult(result) {
+  if (isKnownPlatformResult(result) || isListicleResult(result) || isReportResult(result)) return false
+  const pageText = `${result.title || ''} ${(result.content || '').slice(0, 800)}`
+  return Boolean(pageText.trim())
+}
 
 function buildSearchQuery(profile) {
   const keywords = (profile.keywords || []).slice(0, 5).join(', ')
@@ -35,9 +81,13 @@ function normalizeResult(result, index, profile) {
     name: title,
     type: 'B2B',
     company: hostname,
+    companyName: null,
     title: 'Potential buyer or partner',
     location: profile.geography || 'Not specified',
     contactUrl: result.url,
+    website: null,
+    officialWebsite: null,
+    sourceDomain: hostname,
     employeeCount: profile.target_company_size || 'Not available from web search',
     industry: profile.category || 'Not specified',
     fitScore: Math.round(Math.max(0, Math.min(100, (result.score || 0) * 100))),
@@ -47,6 +97,7 @@ function normalizeResult(result, index, profile) {
       title: result.title,
       url: result.url,
       content: result.content,
+      raw_content: result.raw_content,
       score: result.score
     }
   }
@@ -72,9 +123,9 @@ export async function searchB2BLeads(profile, apiKey = process.env.TAVILY_API_KE
         query,
         topic: 'general',
         search_depth: 'advanced',
-        max_results: 15,
+        max_results: 20,
         include_answer: false,
-        include_raw_content: false
+        include_raw_content: true
       })
     })
 
@@ -85,13 +136,31 @@ export async function searchB2BLeads(profile, apiKey = process.env.TAVILY_API_KE
     }
 
     const results = Array.isArray(payload.results) ? payload.results : []
+    const actionableResults = results.filter(isActionableCompanyResult)
+    const listicleSources = results
+      .filter((result) => !isKnownPlatformResult(result) && isListicleResult(result))
+      .slice(0, 3)
+      .map((result) => ({
+        title: result.title || '',
+        url: result.url || '',
+        content: (result.raw_content || result.content || '').slice(0, 6000)
+      }))
+    const excludedCount = results.length - actionableResults.length - listicleSources.length
+    const baseNotice = actionableResults.length === 0
+      ? results.length > 0 && listicleSources.length === 0
+        ? `Tavily returned ${results.length} pages, but all were filtered because they were social/platform pages, directories, listicles, or reports.`
+        : listicleSources.length > 0
+          ? `Tavily returned ${listicleSources.length} list page${listicleSources.length === 1 ? '' : 's'} for company extraction.`
+          : 'Tavily completed the web search but found no relevant results for this profile.'
+      : `B2B results are web matches, not verified buyers. Review the source evidence before outreach.${excludedCount ? ` Filtered out ${excludedCount} social/report pages.` : ''}${listicleSources.length ? ` Kept ${listicleSources.length} list pages for company extraction.` : ''}`
+
     return {
-      leads: results.map((result, index) => normalizeResult(result, index, profile)),
+      leads: actionableResults.map((result, index) => normalizeResult(result, index, profile)),
+      listicleSources,
       isLiveTavily: true,
       searchQuery: query,
-      notice: results.length === 0
-        ? 'Tavily completed the web search but found no relevant results for this profile.'
-        : 'B2B prospects are web-search matches. Review the source evidence before outreach.'
+      excludedCount,
+      notice: baseNotice
     }
   } catch (error) {
     const message = error?.message || String(error)

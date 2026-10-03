@@ -1,36 +1,34 @@
-import { useEffect, useState } from 'react'
-
 import { Sparkles, CheckCircle2, Loader2, CircleDashed, Users, Gauge } from 'lucide-react'
+import type { DiscoveryPhase } from '../services/api'
 
-export const LoadingPipeline: React.FC = () => {
-  const [currentStep, setCurrentStep] = useState(0)
+interface LoadingPipelineProps {
+  phase: DiscoveryPhase
+  message: string
+}
 
+export const LoadingPipeline: React.FC<LoadingPipelineProps> = ({ phase, message }) => {
   const steps = [
     {
-      title: 'Profile Extraction & Intent Parsing',
-      desc: 'GroqCloud analyzing business domain, target segment, scale, and search vectors',
-      icon: Sparkles
-    },
-    {
-      title: 'B2B & B2C Discovery Querying',
-      desc: 'Searching the web for B2B prospects with Tavily and local businesses with Geoapify',
+      id: 'search' as const,
+      title: 'Search for Companies & Places',
+      desc: 'Querying Tavily and Geoapify for initial candidates',
       icon: Users
     },
     {
-      title: 'Fit Scoring & Rationalization',
-      desc: 'Groq model scoring leads (0-100) and generating personalized fit rationales',
+      id: 'verify' as const,
+      title: 'Verify Companies & Find Contacts',
+      desc: 'Checking company identity, official sites, and available contact details',
+      icon: Sparkles
+    },
+    {
+      id: 'score' as const,
+      title: 'Score & Rank Results',
+      desc: 'Scoring every verified candidate and generating fit rationales',
       icon: Gauge
     }
   ]
-
-  useEffect(() => {
-    const timer1 = setTimeout(() => setCurrentStep(1), 1200)
-    const timer2 = setTimeout(() => setCurrentStep(2), 2400)
-    return () => {
-      clearTimeout(timer1)
-      clearTimeout(timer2)
-    }
-  }, [])
+  const currentStep = steps.findIndex((step) => step.id === phase)
+  const activeStep = Math.max(0, currentStep)
 
   return (
     <div className="w-full max-w-3xl mx-auto py-8">
@@ -47,15 +45,15 @@ export const LoadingPipeline: React.FC = () => {
             </p>
           </div>
           <span className="inline-flex items-center rounded-full bg-indigo-50 border border-indigo-100/80 px-2.5 py-1 text-xs font-medium text-indigo-700">
-            Step {Math.min(currentStep + 1, 3)} of 3
+            Step {activeStep + 1} of {steps.length}
           </span>
         </div>
 
         {/* Steps progression */}
         <div className="space-y-4">
           {steps.map((step, index) => {
-            const isDone = index < currentStep
-            const isCurrent = index === currentStep
+            const isDone = index < activeStep
+            const isCurrent = index === activeStep
             const StepIcon = step.icon
 
             return (
@@ -99,7 +97,9 @@ export const LoadingPipeline: React.FC = () => {
                       {isDone ? 'COMPLETED' : isCurrent ? 'PROCESSING' : 'PENDING'}
                     </span>
                   </div>
-                  <p className="text-xs text-zinc-600 mt-0.5">{step.desc}</p>
+                  <p className="text-xs text-zinc-600 mt-0.5">
+                    {isCurrent ? message || step.desc : step.desc}
+                  </p>
                 </div>
               </div>
             )
@@ -112,7 +112,7 @@ export const LoadingPipeline: React.FC = () => {
             <div
               className="h-full bg-indigo-600 transition-all duration-700 rounded-full"
               style={{
-                width: `${currentStep === 0 ? 33 : currentStep === 1 ? 66 : 100}%`
+                width: `${Math.round(((activeStep + 1) / steps.length) * 100)}%`
               }}
             />
           </div>

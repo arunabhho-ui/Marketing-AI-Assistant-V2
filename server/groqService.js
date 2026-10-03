@@ -1,4 +1,6 @@
 import { Groq } from 'groq-sdk'
+import { runGroqRequest } from './groqRequestQueue.js'
+import { getDiscoveryGroqApiKey } from './groqConfig.js'
 
 export const GROQ_MODEL = 'openai/gpt-oss-20b'
 
@@ -9,12 +11,12 @@ export const GROQ_MODEL = 'openai/gpt-oss-20b'
  * @param {string} [apiKey] - GroqCloud API Key (optional, defaults to process.env.GROQ_API_KEY)
  * @returns {Promise<{ profile: object, isLiveGroq: boolean }>} 
  */
-export async function extractProfile(description, apiKey = process.env.GROQ_API_KEY) {
+export async function extractProfile(description, apiKey = getDiscoveryGroqApiKey()) {
   if (!apiKey || apiKey.trim() === '') {
-    throw new Error('GROQ_API_KEY is required for live extraction. Add it to your .env file.')
+    throw new Error('GROQ_API_KEY1 is required for profile extraction. Add it to your .env file.')
   }
 
-  const groq = new Groq({ apiKey })
+  const groq = new Groq({ apiKey, maxRetries: 0 })
 
   const systemPrompt = `You are an expert B2B and B2C market intelligence analyst.
 Analyze the user's business, product, or service offering and extract a precise, structured customer profile suitable for targeted prospecting.
@@ -34,16 +36,18 @@ You must respond ONLY with a valid JSON object matching this schema:
 Keep every string concise. Return only the JSON object, with no explanation or markdown.`
 
   try {
-    const chatCompletion = await groq.chat.completions.create({
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Analyze this offering and extract the structured customer profile:\n\n"${description}"` }
-      ],
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `Analyze this offering and extract the structured customer profile:\n\n"${description}"` }
+    ]
+    const estimatedTokens = Math.ceil(messages.reduce((total, message) => total + message.content.length, 0) / 3) + 2048
+    const chatCompletion = await runGroqRequest(() => groq.chat.completions.create({
+      messages,
       model: GROQ_MODEL,
       response_format: { type: 'json_object' },
       temperature: 0.1,
-      max_completion_tokens: 4096
-    })
+      max_completion_tokens: 2048
+    }), { estimatedTokens })
 
     const rawContent = chatCompletion.choices[0]?.message?.content
     if (!rawContent) {

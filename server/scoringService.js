@@ -1,8 +1,10 @@
 import { Groq } from 'groq-sdk';
+import { runGroqRequest } from './groqRequestQueue.js';
+import { getScoringGroqApiKey } from './groqConfig.js';
 
 /**
  * Score leads using Groq LLM based on the extracted profile.
- * Returns the original leads enriched with `fitScore` (0-100) and `reason`.
+ * Scores verified leads and returns a fit score with a short rationale.
  * If GROQ_API_KEY is missing or the API call fails, falls back to the
  * existing heuristic scores and marks the result as non‑live.
  *
@@ -11,7 +13,7 @@ import { Groq } from 'groq-sdk';
  * @param {string} [apiKey] - Optional API key; defaults to env var.
  * @returns {Promise<{scoredLeads: Array<object>, isLiveGroq: boolean, modelUsed?: string, notice?: string}>}
  */
-export async function scoreLeads(profile, leads, apiKey = process.env.GROQ_API_KEY) {
+export async function scoreLeads(profile, leads, apiKey = getScoringGroqApiKey()) {
   if (!leads || leads.length === 0) {
     return {
       scoredLeads: [],
@@ -21,10 +23,10 @@ export async function scoreLeads(profile, leads, apiKey = process.env.GROQ_API_K
   }
 
   if (!apiKey || apiKey.trim() === '') {
-    throw new Error('GROQ_API_KEY is required for live lead scoring. Add it to your .env file.');
+    throw new Error('GROQ_API_KEY3 is required for lead scoring. Add it to your .env file.');
   }
 
-  const groq = new Groq({ apiKey: apiKey.trim() });
+  const groq = new Groq({ apiKey: apiKey.trim(), maxRetries: 0 });
 
   // Build a concise representation for each lead.
   const leadSummaries = leads
@@ -33,41 +35,51 @@ export async function scoreLeads(profile, leads, apiKey = process.env.GROQ_API_K
         id: lead.id,
         name: lead.name,
         type: lead.type,
-        company: lead.company || lead.place_type || undefined,
-        title: lead.title,
+        company: lead.companyName || (lead.raw_data?.source_kind === 'listicle_extraction' ? lead.company : undefined) || lead.place_type || undefined,
         location: lead.location,
         industry: lead.industry,
-        evidence: (lead.raw_data?.content || lead.reason || '').slice(0, 500)
+        evidence: (lead.raw_data?.content || lead.reason || '').slice(0, 180)
       };
       return `Lead ${i + 1}: ${JSON.stringify(minimal)}`;
     })
     .join('\n');
 
-  const systemPrompt = `You are an AI analyst that evaluates how well a prospect (lead) matches a target business profile.\nGiven a profile JSON object and a list of leads, produce a JSON array where each element contains:\n  - id (matching the lead's id)\n  - fitScore (integer 0‑100, higher is better)\n  - reason (one short sentence explaining the score)\nScore each lead independently using the information provided. Use the profile fields such as audience_type, category, geography, keywords, etc. Keep the JSON strictly valid (no markdown).`;
+  const systemPrompt = `Score each verified company or local place for plausible fit with the target profile, not confirmed buying intent. Use this calibration: 80-100 = strong direct fit; 65-79 = clear fit; 50-64 = plausible or adjacent fit; 40-49 = weaker but still reasonable fit; below 40 = little relevant fit or clear mismatch. Be generous with plausible prospects: do not require explicit purchase intent, proven adoption, exact keyword matches, or complete public information. Treat missing contact details or limited evidence as unknown, not as evidence of poor fit. Use the candidate's type, industry, location, company identity, and available source evidence to judge whether it could reasonably be a customer or partner; do not invent facts. Return exactly one result per candidate in this JSON shape: {"results":[{"id":"same id","fitScore":75,"reason":"Short evidence-based rationale."}]}. fitScore must be an integer from 0 to 100. Keep each reason under 12 words. Do not add fields, analysis, or prose. Complete the full results array and return valid JSON only.`;
 
-  const userPrompt = `Profile: ${JSON.stringify(profile)}\nLeads:\n${leadSummaries}`;
+  const scoringProfile = {
+    audience_type: profile.audience_type,
+    category: profile.category,
+    geography: profile.geography,
+    target_company_size: profile.target_company_size,
+    target_consumer_segment: profile.target_consumer_segment,
+    keywords: (profile.keywords || []).slice(0, 5)
+  };
+  const userPrompt = `Target: ${JSON.stringify(scoringProfile)}\nCandidates:\n${leadSummaries}`;
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userPrompt }
+  ];
+  const maxCompletionTokens = Math.max(1024, leads.length * 400);
+  const estimatedTokens = Math.ceil(messages.reduce((total, message) => total + message.content.length, 0) / 3) + maxCompletionTokens;
 
   try {
-    const completion = await groq.chat.completions.create({
+    const completion = await runGroqRequest(() => groq.chat.completions.create({
       model: 'openai/gpt-oss-20b',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
+      messages,
       response_format: { type: 'json_object' },
       temperature: 0.1,
-      max_tokens: 2048
-    });
+      max_completion_tokens: maxCompletionTokens
+    }), { estimatedTokens });
 
     const raw = completion.choices[0]?.message?.content;
     if (!raw) throw new Error('Empty response from Groq');
 
     const parsed = JSON.parse(raw);
-    // Ensure parsed is an array of objects.
-    if (!Array.isArray(parsed)) throw new Error('Expected an array of scoring objects');
+    const scoringItems = Array.isArray(parsed) ? parsed : parsed.results;
+    if (!Array.isArray(scoringItems)) throw new Error('Expected a results array in the scoring response');
 
     const scoredLeads = leads.map(lead => {
-      const match = parsed.find(item => item.id === lead.id);
+      const match = scoringItems.find(item => item.id === lead.id);
       if (match && typeof match.fitScore === 'number' && Number.isFinite(match.fitScore)) {
         return {
           ...lead,
@@ -89,20 +101,59 @@ export async function scoreLeads(profile, leads, apiKey = process.env.GROQ_API_K
   }
 }
 
-export async function scoreLeadsUntilTarget(profile, leads, options = {}) {
-  const targetCount = options.targetCount ?? 5;
-  const minScore = options.minScore ?? 60;
-  const maxEvaluated = options.maxEvaluated ?? 15;
+async function scoreBatchWithRecovery(profile, batch, scoreBatch) {
+  try {
+    const result = await scoreBatch(profile, batch);
+    return { ...result, evaluatedCount: batch.length, notice: null };
+  } catch (error) {
+    const isJsonValidationError = /json_validate_failed|failed to validate json/i.test(error.message || '');
+    if (!isJsonValidationError || batch.length <= 1) throw error;
+
+    const midpoint = Math.ceil(batch.length / 2);
+    const recovered = [];
+    const errors = [];
+    let evaluatedCount = 0;
+    let isLiveGroq = false;
+    let modelUsed = null;
+
+    for (const smallerBatch of [batch.slice(0, midpoint), batch.slice(midpoint)]) {
+      if (!smallerBatch.length) continue;
+      try {
+        const result = await scoreBatchWithRecovery(profile, smallerBatch, scoreBatch);
+        recovered.push(...result.scoredLeads);
+        evaluatedCount += result.evaluatedCount;
+        isLiveGroq = isLiveGroq || result.isLiveGroq;
+        modelUsed = result.modelUsed || modelUsed;
+        if (result.notice) errors.push(result.notice);
+      } catch (smallerError) {
+        evaluatedCount += smallerBatch.length;
+        errors.push(smallerError.message);
+      }
+    }
+
+    if (!recovered.length) throw new Error(`JSON scoring failed after splitting the batch: ${errors.join('; ')}`);
+    return {
+      scoredLeads: recovered,
+      evaluatedCount,
+      isLiveGroq,
+      modelUsed,
+      notice: `Split a batch after Groq returned invalid JSON.${errors.length ? ` Some smaller batches failed: ${errors.join('; ')}` : ''}`
+    };
+  }
+}
+
+export async function scoreAllLeads(profile, leads, options = {}) {
+  const minScore = options.minScore ?? 40;
   const batchSize = options.batchSize ?? 5;
   const scoreBatch = options.scoreBatch ?? scoreLeads;
-  const candidates = (leads || []).slice(0, maxEvaluated);
+  const candidates = leads || [];
   const qualifiedLeads = [];
   let evaluatedCount = 0;
   let isLiveGroq = false;
   let modelUsed = null;
-  let notice = null;
+  const notices = [];
 
-  for (let offset = 0; offset < candidates.length && qualifiedLeads.length < targetCount; offset += batchSize) {
+  for (let offset = 0; offset < candidates.length; offset += batchSize) {
     const batch = candidates.slice(offset, offset + batchSize);
     const batchProfile = {
       ...profile,
@@ -110,26 +161,22 @@ export async function scoreLeadsUntilTarget(profile, leads, options = {}) {
     };
 
     try {
-      const result = await scoreBatch(batchProfile, batch);
-      evaluatedCount += batch.length;
+      const result = await scoreBatchWithRecovery(batchProfile, batch, scoreBatch);
+      evaluatedCount += result.evaluatedCount;
       isLiveGroq = isLiveGroq || result.isLiveGroq;
       modelUsed = result.modelUsed || modelUsed;
       qualifiedLeads.push(...result.scoredLeads.filter((lead) => lead.fitScore >= minScore));
+      if (result.notice) notices.push(result.notice);
     } catch (error) {
-      notice = `Scoring stopped after ${evaluatedCount} evaluated results: ${error.message}`;
-      break;
+      evaluatedCount += batch.length;
+      notices.push(`Scoring failed for ${batch.length} candidates: ${error.message}`);
     }
   }
 
-  const selectedLeads = qualifiedLeads.slice(0, targetCount);
-  if (!notice) {
-    notice = selectedLeads.length >= targetCount
-      ? `Found ${selectedLeads.length} results scoring at least ${minScore} after evaluating ${evaluatedCount} candidates.`
-      : `Found ${selectedLeads.length} of ${targetCount} results scoring at least ${minScore} after evaluating ${evaluatedCount} of up to ${maxEvaluated} candidates.`
-  }
+  const notice = `Scored ${evaluatedCount} of ${candidates.length} available candidates; ${qualifiedLeads.length} scored at least ${minScore}.${notices.length ? ` ${notices.join(' ')}` : ''}`
 
   return {
-    scoredLeads: selectedLeads,
+    scoredLeads: qualifiedLeads,
     evaluatedCount,
     isLiveGroq,
     modelUsed,

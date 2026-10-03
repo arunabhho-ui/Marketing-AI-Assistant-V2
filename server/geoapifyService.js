@@ -94,6 +94,12 @@ function normalizeB2CLead(place, index, profile) {
     contactUrl,
     website,
     phone,
+    email,
+    emailSource: email ? 'Geoapify listing' : null,
+    phoneSource: phone ? 'Geoapify listing' : null,
+    contactSource: phone || email ? 'Geoapify listing' : null,
+    contactConfidence: phone || email ? 'Listed by Geoapify' : null,
+    contactStatus: phone || email ? 'Contact found' : 'No public contact found',
     raw_data: props
   }
 }
@@ -212,7 +218,7 @@ export async function searchB2CLeads(profile, apiKey = process.env.GEOAPIFY_API_
     }
 
     const normalized = uniqueFeatures
-      .slice(0, 15)
+      .slice(0, 20)
       .map((f, idx) => normalizeB2CLead(f, idx, profile))
 
     return {

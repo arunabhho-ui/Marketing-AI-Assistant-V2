@@ -17,8 +17,10 @@ export interface Lead {
   id: string
   name: string
   type: LeadType
+  isSingleCompany?: boolean
   title?: string
   company?: string
+  companyName?: string | null
   placeType?: string
   location: string
   address?: string
@@ -26,7 +28,16 @@ export interface Lead {
   reason: string
   contactUrl?: string
   website?: string
+  officialWebsite?: string | null
+  websiteVerification?: string | null
+  sourceDomain?: string
   phone?: string
+  email?: string
+  emailSource?: string | null
+  phoneSource?: string | null
+  contactSource?: string | null
+  contactConfidence?: string | null
+  contactStatus?: string
   employeeCount?: string
   industry?: string
   tags: string[]

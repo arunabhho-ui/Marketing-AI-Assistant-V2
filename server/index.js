@@ -6,7 +6,10 @@ import { fileURLToPath } from 'url'
 import { extractProfile } from './groqService.js'
 import { searchB2BLeads } from './tavilyService.js'
 import { searchB2CLeads } from './geoapifyService.js'
-import { scoreLeadsUntilTarget } from './scoringService.js'
+import { scoreAllLeads } from './scoringService.js'
+import { enrichB2BContacts } from './contactEnrichmentService.js'
+import { extractCompaniesFromListSources, verifyCompanyCandidates } from './companyCandidateService.js'
+import { getGroqConfiguration } from './groqConfig.js'
 
 // Load environment variables from parent root or current directory
 const __filename = fileURLToPath(import.meta.url)
@@ -21,13 +24,45 @@ const PORT = process.env.PORT || 5000
 app.use(cors())
 app.use(express.json())
 
+async function prepareB2BCandidates(profile, searchResult) {
+  const extractedCompanies = await extractCompaniesFromListSources(
+    searchResult.listicleSources,
+    profile
+  )
+  const directCandidates = (searchResult.leads || []).map((lead) => ({
+    ...lead,
+    type: 'B2B',
+    reason: lead.reason || `Web result relevant to ${profile.category}. Review the source before outreach.`,
+    tags: lead.tags || ['B2B', 'Tavily web result', 'Potential B2B prospect']
+  }))
+
+  const candidates = [...directCandidates, ...extractedCompanies]
+  const verification = await verifyCompanyCandidates(candidates, profile)
+  const leadsWithContacts = await enrichB2BContacts(verification.leads, { geography: profile.geography })
+  const notices = [
+    extractedCompanies.length
+      ? `Extracted ${extractedCompanies.length} named companies from Tavily list pages; official websites will be verified before contact lookup.`
+      : searchResult.listicleSources?.length
+        ? 'Tavily returned list pages, but no company names with verifiable source quotes could be extracted.'
+        : null,
+    verification.notice,
+    verification.rejectedCount > 0 ? `Rejected ${verification.rejectedCount} candidates that did not verify as individual companies.` : null
+  ].filter(Boolean)
+
+  return {
+    candidates: leadsWithContacts,
+    isLiveGroqVerification: verification.isLiveGroq,
+    notice: notices.join(' ') || null
+  }
+}
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
     config: {
-      groqConfigured: Boolean(process.env.GROQ_API_KEY && process.env.GROQ_API_KEY.trim() !== ''),
+      ...getGroqConfiguration(),
       tavilyConfigured: Boolean(process.env.TAVILY_API_KEY && process.env.TAVILY_API_KEY.trim() !== ''),
       geoapifyConfigured: Boolean(process.env.GEOAPIFY_API_KEY && process.env.GEOAPIFY_API_KEY.trim() !== '')
     }
@@ -89,13 +124,9 @@ app.post('/api/discover-b2b', async (req, res) => {
     console.log(`[API] Initiating B2B discovery for category: "${profile.category}", geo: "${profile.geography}"`)
 
     const result = await searchB2BLeads(profile)
-    const candidates = (result.leads || []).slice(0, 15).map((lead) => ({
-      ...lead,
-      type: 'B2B',
-      reason: lead.reason || `Web result relevant to ${profile.category}. Review the source before outreach.`,
-      tags: lead.tags || ['B2B', 'Tavily web result', 'Potential buyer or partner']
-    }))
-    const scoring = await scoreLeadsUntilTarget({ ...profile, audience_type: 'B2B' }, candidates)
+    const prepared = await prepareB2BCandidates(profile, result)
+    const candidates = prepared.candidates
+    const scoring = await scoreAllLeads({ ...profile, audience_type: 'B2B' }, candidates)
 
     return res.json({
       success: true,
@@ -103,9 +134,9 @@ app.post('/api/discover-b2b', async (req, res) => {
       meta: {
         isLiveTavily: result.isLiveTavily,
         searchQuery: result.searchQuery || null,
-        isLiveGroq: scoring.isLiveGroq,
+        isLiveGroq: scoring.isLiveGroq || prepared.isLiveGroqVerification,
         evaluatedCount: scoring.evaluatedCount,
-        notice: [result.notice, scoring.notice].filter(Boolean).join(' ') || null,
+        notice: [result.notice, prepared.notice, scoring.notice].filter(Boolean).join(' ') || null,
         count: scoring.scoredLeads.length
       }
     })
@@ -136,13 +167,13 @@ app.post('/api/discover-b2c', async (req, res) => {
     console.log(`[API] Initiating B2C discovery for category: "${profile.category}", geo: "${profile.geography}"`)
 
     const result = await searchB2CLeads(profile)
-    const candidates = (result.leads || []).slice(0, 15).map((place) => ({
+    const candidates = (result.leads || []).map((place) => ({
       ...place,
       type: 'B2C',
       reason: place.reason || `Local place relevant to ${profile.category}.`,
       tags: place.tags || ['B2C', place.place_type || 'Facility']
     }))
-    const scoring = await scoreLeadsUntilTarget({ ...profile, audience_type: 'B2C' }, candidates)
+    const scoring = await scoreAllLeads({ ...profile, audience_type: 'B2C' }, candidates)
 
     return res.json({
       success: true,
@@ -170,43 +201,61 @@ app.post('/api/discover-b2c', async (req, res) => {
  * Body: { profile: object }
  */
 app.post('/api/discover', async (req, res) => {
-  try {
-    const { profile } = req.body
+  const { profile } = req.body
+  if (!profile || typeof profile !== 'object') {
+    return res.status(400).json({
+      error: 'Missing required field "profile" object in request body.'
+    })
+  }
 
-    if (!profile || typeof profile !== 'object') {
-      return res.status(400).json({
-        error: 'Missing required field "profile" object in request body.'
-      })
+  res.status(200)
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-cache, no-transform')
+  res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Accel-Buffering', 'no')
+  res.flushHeaders?.()
+
+  const sendEvent = (event, payload) => {
+    if (!res.destroyed && !res.writableEnded) {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`)
     }
+  }
+  const heartbeat = setInterval(() => {
+    if (!res.destroyed && !res.writableEnded) res.write(': keep-alive\n\n')
+  }, 10_000)
+  res.on('close', () => clearInterval(heartbeat))
 
+  try {
     const audience = profile.audience_type || 'both'
     console.log(`[API] Universal discovery triggered for audience "${audience}" (${profile.category})`)
+    sendEvent('progress', { phase: 'search', message: 'Searching Tavily and Geoapify for initial company and place candidates.' })
 
     let allLeads = []
     const meta = {
       audience,
       isLiveTavily: false,
       isLiveGeoapify: false,
+      isLiveGroqVerification: false,
       searchQuery: null,
       notices: []
     }
 
     if (audience === 'B2B') {
       const b2bRes = await searchB2BLeads(profile)
+      sendEvent('progress', { phase: 'verify', message: 'Filtering web pages, extracting listed companies, verifying company identity, and finding contacts.' })
+      const b2bPrepared = await prepareB2BCandidates(profile, b2bRes)
       meta.isLiveTavily = b2bRes.isLiveTavily
       meta.searchQuery = b2bRes.searchQuery || null
       if (b2bRes.notice) meta.notices.push(b2bRes.notice)
-      allLeads = (b2bRes.leads || []).slice(0, 15).map((l) => ({
-        ...l,
-        type: 'B2B',
-        reason: l.reason || `Web result relevant to ${profile.category} in ${l.location}. Review the source before treating it as a qualified prospect.`,
-        tags: l.tags || ['B2B', profile.category?.split(' ')[0] || 'Business', 'Tavily web result']
-      }))
+      if (b2bPrepared.notice) meta.notices.push(b2bPrepared.notice)
+      meta.isLiveGroqVerification = b2bPrepared.isLiveGroqVerification
+      allLeads = b2bPrepared.candidates
     } else if (audience === 'B2C') {
       const b2cRes = await searchB2CLeads(profile)
+      sendEvent('progress', { phase: 'verify', message: 'Validating place records and using the contact details supplied by Geoapify.' })
       meta.isLiveGeoapify = b2cRes.isLiveGeoapify
       if (b2cRes.notice) meta.notices.push(b2cRes.notice)
-      allLeads = (b2cRes.leads || []).slice(0, 15).map((l) => ({
+      allLeads = (b2cRes.leads || []).map((l) => ({
         ...l,
         type: 'B2C',
         reason: l.reason || `Target local facility matching ${profile.category} in ${l.location}.`,
@@ -218,21 +267,20 @@ app.post('/api/discover', async (req, res) => {
         searchB2BLeads(profile),
         searchB2CLeads(profile)
       ])
+      sendEvent('progress', { phase: 'verify', message: 'Filtering web pages, verifying companies and official sites, and collecting company/place contacts.' })
+      const b2bPrepared = await prepareB2BCandidates(profile, b2bRes)
 
       meta.isLiveTavily = b2bRes.isLiveTavily
       meta.searchQuery = b2bRes.searchQuery || null
       meta.isLiveGeoapify = b2cRes.isLiveGeoapify
       if (b2bRes.notice) meta.notices.push(b2bRes.notice)
+      if (b2bPrepared.notice) meta.notices.push(b2bPrepared.notice)
       if (b2cRes.notice) meta.notices.push(b2cRes.notice)
+      meta.isLiveGroqVerification = b2bPrepared.isLiveGroqVerification
 
-      const b2bEnriched = (b2bRes.leads || []).slice(0, 15).map((l) => ({
-        ...l,
-        type: 'B2B',
-        reason: l.reason || `Web result relevant to ${profile.category}. Review the source before treating it as a qualified prospect.`,
-        tags: l.tags || ['B2B', 'Tavily web result', 'Potential buyer or partner']
-      }))
+      const b2bEnriched = b2bPrepared.candidates
 
-      const b2cEnriched = (b2cRes.leads || []).slice(0, 15).map((l) => ({
+      const b2cEnriched = (b2cRes.leads || []).map((l) => ({
         ...l,
         type: 'B2C',
         reason: l.reason || `Key community outpatient/retail location for ${profile.category}.`,
@@ -250,18 +298,19 @@ app.post('/api/discover', async (req, res) => {
     
     const wantsB2B = audience === 'B2B' || audience === 'both' || !['B2B', 'B2C'].includes(audience)
     const wantsB2C = audience === 'B2C' || audience === 'both' || !['B2B', 'B2C'].includes(audience)
-    const b2bCandidates = allLeads.filter((lead) => lead.type === 'B2B').slice(0, 15)
-    const b2cCandidates = allLeads.filter((lead) => lead.type === 'B2C').slice(0, 15)
+    const b2bCandidates = allLeads.filter((lead) => lead.type === 'B2B')
+    const b2cCandidates = allLeads.filter((lead) => lead.type === 'B2C')
+    sendEvent('progress', { phase: 'score', message: `Scoring all ${b2bCandidates.length} B2B and ${b2cCandidates.length} B2C verified candidates.` })
     const [b2bScoring, b2cScoring] = await Promise.all([
       wantsB2B
-        ? scoreLeadsUntilTarget({ ...profile, audience_type: 'B2B' }, b2bCandidates)
+        ? scoreAllLeads({ ...profile, audience_type: 'B2B' }, b2bCandidates)
         : Promise.resolve({ scoredLeads: [], evaluatedCount: 0, isLiveGroq: false }),
       wantsB2C
-        ? scoreLeadsUntilTarget({ ...profile, audience_type: 'B2C' }, b2cCandidates)
+        ? scoreAllLeads({ ...profile, audience_type: 'B2C' }, b2cCandidates)
         : Promise.resolve({ scoredLeads: [], evaluatedCount: 0, isLiveGroq: false })
     ])
     meta.evaluated = { B2B: b2bScoring.evaluatedCount, B2C: b2cScoring.evaluatedCount }
-    meta.isLiveGroq = b2bScoring.isLiveGroq || b2cScoring.isLiveGroq
+    meta.isLiveGroq = meta.isLiveGroqVerification || b2bScoring.isLiveGroq || b2cScoring.isLiveGroq
     meta.modelUsed = b2bScoring.modelUsed || b2cScoring.modelUsed || null
     if (b2bScoring.notice) meta.notices.push(`B2B: ${b2bScoring.notice}`)
     if (b2cScoring.notice) meta.notices.push(`B2C: ${b2cScoring.notice}`)
@@ -273,7 +322,7 @@ app.post('/api/discover', async (req, res) => {
       if (b2cScoring.scoredLeads[i]) allLeads.push(b2cScoring.scoredLeads[i])
     }
 
-    return res.json({
+    sendEvent('complete', {
       success: true,
       data: allLeads,
       meta: {
@@ -282,18 +331,25 @@ app.post('/api/discover', async (req, res) => {
         notice: meta.notices.join(' ') || null
       }
     })
+    res.end()
   } catch (error) {
     console.error('[API] /api/discover error:', error)
-    return res.status(500).json({
+    sendEvent('failure', {
       success: false,
       error: 'Discovery pipeline failed: ' + error.message
     })
+    res.end()
+  } finally {
+    clearInterval(heartbeat)
   }
 })
 
 app.listen(PORT, () => {
   console.log(`[Server] Client Finder API running at http://localhost:${PORT}`)
-  console.log(`[Server] GroqCloud: ${process.env.GROQ_API_KEY ? 'Configured ✓' : 'Fallback active'}`)
+  const groqConfig = getGroqConfiguration()
+  console.log(`[Server] Groq discovery key: ${groqConfig.discoveryConfigured ? 'Configured' : 'Missing'}`)
+  console.log(`[Server] Groq verification key: ${groqConfig.verificationConfigured ? 'Configured' : 'Missing'}`)
+  console.log(`[Server] Groq scoring key: ${groqConfig.scoringConfigured ? 'Configured' : 'Missing'}`)
   console.log(`[Server] Tavily: ${process.env.TAVILY_API_KEY ? 'Configured' : 'Not configured'}`)
   console.log(`[Server] Geoapify: ${process.env.GEOAPIFY_API_KEY ? 'Configured ✓' : 'Fallback active'}`)
 })

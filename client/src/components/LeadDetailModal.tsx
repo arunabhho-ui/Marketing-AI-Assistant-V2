@@ -6,6 +6,7 @@ import {
   MapPin,
   Globe,
   Phone,
+  Mail,
   Sparkles,
   Users,
   Briefcase,
@@ -50,10 +51,13 @@ export const LeadDetailModal: FC<LeadDetailModalProps> = ({ lead, onClose }) => 
                 {lead.fitScore}/100 Fit Score
               </span>
             </div>
-            <h3 className="text-lg font-semibold text-zinc-900 mt-2">{lead.name}</h3>
+            <h3 className="text-lg font-semibold text-zinc-900 mt-2">
+              {lead.type === 'B2B' ? lead.companyName || lead.company || lead.name : lead.name}
+            </h3>
             <p className="text-xs text-zinc-600">
-              {lead.title ? `${lead.title} at ` : ''}
-              <span className="font-medium text-zinc-800">{lead.company}</span>
+              {lead.type === 'B2B'
+                ? `Found via: ${lead.name}`
+                : `${lead.title ? `${lead.title} at ` : ''}${lead.company || ''}`}
             </p>
           </div>
 
@@ -108,15 +112,32 @@ export const LeadDetailModal: FC<LeadDetailModalProps> = ({ lead, onClose }) => 
             )}
 
             {lead.phone && (
-              <div className="rounded-lg border border-zinc-200/80 bg-zinc-50/50 p-3">
+              <a href={`tel:${lead.phone.replace(/[^+\d]/g, '')}`} className="rounded-lg border border-zinc-200/80 bg-zinc-50/50 p-3 hover:bg-zinc-100">
                 <span className="text-zinc-600 flex items-center mb-1">
                   <Phone className="w-3.5 h-3.5 mr-1 text-zinc-400" />
-                  Phone
+                  Phone{lead.phoneSource ? ` · ${lead.phoneSource}` : ''}
                 </span>
                 <p className="font-medium text-zinc-900">{lead.phone}</p>
-              </div>
+              </a>
+            )}
+
+            {lead.email && (
+              <a href={`mailto:${lead.email}`} className="rounded-lg border border-zinc-200/80 bg-zinc-50/50 p-3 hover:bg-zinc-100 min-w-0">
+                <span className="text-zinc-600 flex items-center mb-1">
+                  <Mail className="w-3.5 h-3.5 mr-1 text-zinc-400" />
+                  Email{lead.emailSource ? ` · ${lead.emailSource}` : ''}
+                </span>
+                <p className="font-medium text-zinc-900 break-all">{lead.email}</p>
+              </a>
             )}
           </div>
+
+          <p className="text-[11px] text-zinc-500">
+            {lead.contactStatus || (lead.phone || lead.email ? 'Contact found' : 'No public contact found')}
+            {lead.contactSource ? ` · ${lead.contactSource}` : ''}
+            {lead.contactConfidence ? ` · ${lead.contactConfidence}` : ''}
+            {lead.websiteVerification ? ` · ${lead.websiteVerification}` : ''}
+          </p>
 
           {/* Tags */}
           {lead.tags && lead.tags.length > 0 && (
@@ -170,7 +191,7 @@ export const LeadDetailModal: FC<LeadDetailModalProps> = ({ lead, onClose }) => 
                 className="inline-flex items-center rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 transition-colors shadow-2xs"
               >
                 <Globe className="w-3.5 h-3.5 mr-1.5 text-zinc-500" />
-                Website
+                Official website
                 <ExternalLink className="w-3 h-3 ml-1 text-zinc-400" />
               </a>
             )}

@@ -7,7 +7,12 @@ import {
   Globe,
   ArrowUpDown,
   Search,
-  Eye
+  Eye,
+  Mail,
+  Phone,
+  Download,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react'
 import type { Lead, FilterType } from '../types'
 
@@ -34,6 +39,8 @@ export const ResultsTable: FC<ResultsTableProps> = ({
   const [searchQuery, setSearchQuery] = useState('')
   const [sortBy, setSortBy] = useState<'fitScore' | 'name'>('fitScore')
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc')
+  const [currentPage, setCurrentPage] = useState(1)
+  const pageSize = 5
 
   // Filter leads
   const filteredLeads = leads
@@ -58,17 +65,76 @@ export const ResultsTable: FC<ResultsTableProps> = ({
       }
     })
 
+  const totalPages = Math.ceil(filteredLeads.length / pageSize)
+  const pageStart = (currentPage - 1) * pageSize
+  const pageLeads = filteredLeads.slice(pageStart, pageStart + pageSize)
+  const visiblePageNumbers: (number | 'ellipsis')[] = totalPages <= 5
+    ? Array.from({ length: totalPages }, (_, index) => index + 1)
+    : [
+        1,
+        ...(currentPage > 3 ? ['ellipsis' as const] : []),
+        ...Array.from(
+          { length: Math.max(0, Math.min(totalPages - 1, currentPage + 1) - Math.max(2, currentPage - 1) + 1) },
+          (_, index) => Math.max(2, currentPage - 1) + index
+        ),
+        ...(currentPage < totalPages - 2 ? ['ellipsis' as const] : []),
+        totalPages
+      ]
+
   const b2bCount = leads.filter((l) => l.type === 'B2B').length
   const b2cCount = leads.filter((l) => l.type === 'B2C').length
   const avgScore = Math.round(leads.reduce((sum, l) => sum + l.fitScore, 0) / (leads.length || 1))
 
   const toggleSort = (field: 'fitScore' | 'name') => {
+    setCurrentPage(1)
     if (sortBy === field) {
       setSortOrder(sortOrder === 'desc' ? 'asc' : 'desc')
     } else {
       setSortBy(field)
       setSortOrder('desc')
     }
+  }
+
+  const downloadCsv = () => {
+    const columns: { label: string; value: (lead: Lead) => unknown }[] = [
+      { label: 'Name', value: (lead) => lead.name },
+      { label: 'Organization', value: (lead) => lead.companyName || lead.company },
+      { label: 'Type', value: (lead) => lead.type },
+      { label: 'Title', value: (lead) => lead.title },
+      { label: 'Phone', value: (lead) => lead.phone },
+      { label: 'Email', value: (lead) => lead.email },
+      { label: 'Location', value: (lead) => lead.location },
+      { label: 'Address', value: (lead) => lead.address },
+      { label: 'Website', value: (lead) => lead.website || lead.officialWebsite },
+      { label: 'Source / Map Link', value: (lead) => lead.contactUrl },
+      { label: 'Fit Score', value: (lead) => lead.fitScore },
+      { label: 'Description / AI Rationale', value: (lead) => lead.reason },
+      { label: 'Source Evidence', value: (lead) => lead.rawData?.content },
+      { label: 'Industry', value: (lead) => lead.industry },
+      { label: 'Company Size', value: (lead) => lead.employeeCount },
+      { label: 'Tags', value: (lead) => lead.tags.join(', ') },
+      { label: 'Contact Source', value: (lead) => lead.contactSource },
+      { label: 'Phone Source', value: (lead) => lead.phoneSource },
+      { label: 'Email Source', value: (lead) => lead.emailSource }
+    ]
+    const escapeCell = (value: unknown) => {
+      const text = value == null ? '' : String(value)
+      const safeText = /^[\s]*[=+\-@]/.test(text) ? `'${text}` : text
+      return `"${safeText.replace(/"/g, '""')}"`
+    }
+    const csv = [
+      columns.map((column) => escapeCell(column.label)).join(','),
+      ...leads.map((lead) => columns.map((column) => escapeCell(column.value(lead))).join(','))
+    ].join('\r\n')
+    const blob = new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `prospects-${new Date().toISOString().slice(0, 10)}.csv`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
   }
 
   const getScoreBadge = (score: number) => {
@@ -151,6 +217,14 @@ export const ResultsTable: FC<ResultsTableProps> = ({
             <span className="font-semibold text-zinc-900">{b2cCount}</span>
           </div>
           <button
+            onClick={downloadCsv}
+            disabled={leads.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-medium text-zinc-700 hover:bg-zinc-50 transition-colors shadow-2xs text-xs cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Download className="h-3.5 w-3.5" />
+            Download Excel (CSV)
+          </button>
+          <button
             onClick={onNewSearch}
             className="rounded-lg bg-zinc-900 px-3 py-1.5 font-medium text-white hover:bg-zinc-800 transition-colors shadow-2xs text-xs cursor-pointer ml-auto sm:ml-0"
           >
@@ -164,7 +238,10 @@ export const ResultsTable: FC<ResultsTableProps> = ({
         {/* Type tabs */}
         <div className="flex items-center rounded-lg border border-zinc-200 bg-zinc-100/80 p-0.5 text-xs font-medium">
           <button
-            onClick={() => setFilterType('all')}
+            onClick={() => {
+              setCurrentPage(1)
+              setFilterType('all')
+            }}
             className={`rounded-md px-3 py-1.5 transition-all cursor-pointer ${
               filterType === 'all'
                 ? 'bg-white text-zinc-900 shadow-2xs font-semibold'
@@ -174,7 +251,10 @@ export const ResultsTable: FC<ResultsTableProps> = ({
             All Types ({leads.length})
           </button>
           <button
-            onClick={() => setFilterType('B2B')}
+            onClick={() => {
+              setCurrentPage(1)
+              setFilterType('B2B')
+            }}
             className={`flex items-center space-x-1.5 rounded-md px-3 py-1.5 transition-all cursor-pointer ${
               filterType === 'B2B'
                 ? 'bg-white text-zinc-900 shadow-2xs font-semibold'
@@ -185,7 +265,10 @@ export const ResultsTable: FC<ResultsTableProps> = ({
             <span>B2B Only ({b2bCount})</span>
           </button>
           <button
-            onClick={() => setFilterType('B2C')}
+            onClick={() => {
+              setCurrentPage(1)
+              setFilterType('B2C')
+            }}
             className={`flex items-center space-x-1.5 rounded-md px-3 py-1.5 transition-all cursor-pointer ${
               filterType === 'B2C'
                 ? 'bg-white text-zinc-900 shadow-2xs font-semibold'
@@ -203,7 +286,10 @@ export const ResultsTable: FC<ResultsTableProps> = ({
           <input
             type="text"
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => {
+              setCurrentPage(1)
+              setSearchQuery(e.target.value)
+            }}
             placeholder="Filter table results..."
             className="w-full rounded-lg border border-zinc-200 bg-white py-1.5 pl-8 pr-3 text-xs text-zinc-900 placeholder:text-zinc-600 focus:border-zinc-400 focus:outline-hidden shadow-2xs"
           />
@@ -251,7 +337,7 @@ export const ResultsTable: FC<ResultsTableProps> = ({
 
             {/* Table Body */}
             <tbody className="divide-y divide-zinc-100">
-              {filteredLeads.map((lead, index) => (
+              {pageLeads.map((lead, index) => (
                 <tr
                   key={lead.id}
                   onClick={() => onSelectLead(lead)}
@@ -261,7 +347,7 @@ export const ResultsTable: FC<ResultsTableProps> = ({
                   <td className="py-3.5 px-4 align-top">
                     <div className="flex items-start space-x-3">
                       <span className="font-mono text-[11px] font-medium text-zinc-600 mt-0.5">
-                        0{index + 1}
+                        {String(pageStart + index + 1).padStart(2, '0')}
                       </span>
                       <div>
                         <div className="font-semibold text-zinc-900 text-[13px] group-hover:text-indigo-600 transition-colors flex items-center">
@@ -281,6 +367,37 @@ export const ResultsTable: FC<ResultsTableProps> = ({
                           <MapPin className="w-3 h-3 mr-1 text-zinc-400 shrink-0" />
                           <span className="truncate">{lead.location}</span>
                         </div>
+                        {(lead.email || lead.phone || lead.contactStatus) && (
+                          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-zinc-700">
+                            {lead.email && (
+                              <a
+                                href={`mailto:${lead.email}`}
+                                onClick={(event) => event.stopPropagation()}
+                                className="inline-flex max-w-full items-center gap-1 truncate hover:text-indigo-700"
+                                title={lead.email}
+                              >
+                                <Mail className="h-3 w-3 shrink-0 text-zinc-500" />
+                                <span className="truncate">{lead.email}</span>
+                              </a>
+                            )}
+                            {lead.phone && (
+                              <a
+                                href={`tel:${lead.phone.replace(/[^+\d]/g, '')}`}
+                                onClick={(event) => event.stopPropagation()}
+                                className="inline-flex items-center gap-1 hover:text-indigo-700"
+                              >
+                                <Phone className="h-3 w-3 shrink-0 text-zinc-500" />
+                                {lead.phone}
+                              </a>
+                            )}
+                            {!lead.email && !lead.phone && lead.contactStatus && (
+                              <span className="text-zinc-500">{lead.contactStatus}</span>
+                            )}
+                            {lead.contactSource && (lead.email || lead.phone) && (
+                              <span className="text-zinc-500">via {lead.contactSource}</span>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </td>
@@ -376,14 +493,57 @@ export const ResultsTable: FC<ResultsTableProps> = ({
         </div>
 
         {/* Table footer */}
-        <div className="flex items-center justify-between border-t border-zinc-200/80 bg-zinc-50/50 px-4 py-2.5 text-xs text-zinc-600">
+        <div className="flex flex-col gap-2 border-t border-zinc-200/80 bg-zinc-50/50 px-4 py-2.5 text-xs text-zinc-600 sm:flex-row sm:items-center sm:justify-between">
           <span>
-            Showing <strong className="font-semibold text-zinc-900">{filteredLeads.length}</strong> of{' '}
+            Showing <strong className="font-semibold text-zinc-900">
+              {filteredLeads.length ? `${pageStart + 1}-${Math.min(pageStart + pageSize, filteredLeads.length)}` : '0'}
+            </strong> of{' '}
+            <strong className="font-semibold text-zinc-900">{filteredLeads.length}</strong> filtered (
             {leads.length} discovered entities
+            )
           </span>
-          <span className="text-[11px] text-zinc-600">
-            Click any row to view structured details
-          </span>
+          <nav className="flex items-center justify-between gap-3 sm:justify-end" aria-label="Results pages">
+            <button
+              type="button"
+              onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+              disabled={currentPage <= 1}
+              aria-label="Previous page"
+              className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-white px-2 py-1 text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+              Previous
+            </button>
+            <div className="flex items-center gap-1">
+              {visiblePageNumbers.map((page, index) => page === 'ellipsis' ? (
+                <span key={`ellipsis-${index}`} className="px-1 text-zinc-500" aria-hidden="true">...</span>
+              ) : (
+                <button
+                  key={page}
+                  type="button"
+                  onClick={() => setCurrentPage(page)}
+                  aria-label={`Page ${page}`}
+                  aria-current={currentPage === page ? 'page' : undefined}
+                  className={`min-w-7 rounded-md border px-2 py-1 ${
+                    currentPage === page
+                      ? 'border-zinc-900 bg-zinc-900 text-white'
+                      : 'border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100'
+                  }`}
+                >
+                  {page}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+              disabled={currentPage >= totalPages}
+              aria-label="Next page"
+              className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-white px-2 py-1 text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Next
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          </nav>
         </div>
       </div>
     </div>

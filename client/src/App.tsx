@@ -7,6 +7,7 @@ import { LoadingPipeline } from './components/LoadingPipeline'
 import { EmptyState } from './components/EmptyState'
 import { LeadDetailModal } from './components/LeadDetailModal'
 import { fetchProfileExtraction, fetchHealth, fetchDiscovery } from './services/api'
+import type { DiscoveryPhase } from './services/api'
 import type { Lead, ViewState, StructuredProfile } from './types'
 import { AlertCircle } from 'lucide-react'
 
@@ -31,6 +32,10 @@ export function App() {
   const [profile, setProfile] = useState<StructuredProfile>(EMPTY_PROFILE)
   const [isExtracting, setIsExtracting] = useState(false)
   const [extractError, setExtractError] = useState<string | null>(null)
+  const [discoveryProgress, setDiscoveryProgress] = useState<{
+    phase: DiscoveryPhase
+    message: string
+  }>({ phase: 'search', message: 'Preparing discovery search...' })
   const [meta, setMeta] = useState<{
     isLiveGroq?: boolean
     modelUsed?: string | null
@@ -53,7 +58,7 @@ export function App() {
   useEffect(() => {
     fetchHealth()
       .then((res) => {
-        if (res.config?.groqConfigured) {
+        if (res.config?.groqDiscoveryConfigured || res.config?.groqConfigured) {
           setMeta((prev) => ({
             ...prev,
             isLiveGroq: true,
@@ -98,9 +103,12 @@ export function App() {
     setExtractError(null)
     setLeads([])
     setDiscoveryMeta(undefined)
+    setDiscoveryProgress({ phase: 'search', message: 'Searching Tavily and Geoapify for candidates...' })
 
     try {
-      const response = await fetchDiscovery(confirmedProfile)
+      const response = await fetchDiscovery(confirmedProfile, (progress) => {
+        setDiscoveryProgress(progress)
+      })
       if (!response.success || !response.data) {
         throw new Error('Invalid discovery response from server')
       }
@@ -189,7 +197,7 @@ export function App() {
         {/* View 3: Loading Pipeline */}
         {viewState === 'loading' && (
           <div className="animate-in fade-in duration-200">
-            <LoadingPipeline />
+            <LoadingPipeline phase={discoveryProgress.phase} message={discoveryProgress.message} />
           </div>
         )}
 
